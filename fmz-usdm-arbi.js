@@ -10,6 +10,7 @@ let CONTRACT_SIZE = 10;
 const FUNDING_PERIOD = 7 * 24 * 60 * 60 * 1000;
 const ONE_HOUR = 1000 * 60 * 60;
 
+const INIT_VALUE = 10_000;
 function main() {
     // const [spotEx, coinmEx] = exchanges;
     // Log(spotMarkets);
@@ -31,29 +32,63 @@ function monitor() {
     let [spotMarkets, coinmMarkets] = getMarkets([spotEx, coinmEx]);
     while (true) {
         const now = (new Date()).valueOf();
-        // record every hour
-        if (!lastRecordTime || now - lastRecordTime >= ONE_HOUR) {
+        // record every hour at the first minute
+        if (!lastRecordTime || (now - lastRecordTime >= ONE_HOUR && now.getMinutes() === 1)) {
             lastRecordTime = now;
             const avgFundingRates = getAvgFundingRates(coinmMarkets, coinmEx);
             // logFundiongRates(avgFundingRates);
             Log('funding rates')
             Log(avgFundingRates.slice(0, 10));
             Log('positions')
-            const positions = getCoinmPositions(coinmMarkets, coinmEx);
+            let positions = getCoinmPositions(coinmMarkets, coinmEx);
+            reinvest(coinmEx, positions);
+            // get positions again after reinvesting
+            positions = getCoinmPositions(coinmMarkets, coinmEx);
             const assetsAndValues = getAssetsAndValues(coinmEx);
             Log('assets')
             Log(assetsAndValues)
             const assetsValue = assetsAndValues.reduce((prev, cur) => prev + cur.value, 0);
             const totalValue = positions.reduce((prev, cur) => prev + cur.totalValue, 0);
-            const profit = assetsValue + totalValue;
+            const profit = assetsValue + totalValue - INIT_VALUE;
             Log('assetsValue', assetsValue, 'totalValue', totalValue, 'profit', profit);
+            // LogProfitReset();
             LogProfit(profit);
             logTable(positions, assetsAndValues, avgFundingRates);
         }
         Sleep(10000);
     }
 }
-// TODO: re-invest
+
+function reinvest(coinmEx, positions) {
+    for (const pos of positions) {
+        // TODO: chagne 10 to the correct contract_size
+        if (pos.reduceableValue > 10) {
+            // TODO: error handling
+            reduceMargin(coinmEx, pos.symbol, pos.reduceable);
+        }
+    }
+    const assets = coinmEx.GetAssets();
+    for (const asset of assets) {
+        const currency = `${asset.Currency}_USD`;
+        coinmEx.IO('currency', currency);
+        coinmEx.SetContractType("swap");
+        const ticker = coinmEx.GetTicker();
+        const value = ticker.Buy * asset.Amount;
+        // TODO: chagne 10 to the correct contract_size, may remove this check because if value is < 10, order will not be triggered
+        if (value >= 10) {
+            // TODO: set direaction at an unified place
+            coinmEx.SetDirection('sell');
+            Log(`reinvesting ${currency}, asset amount: ${asset.Amount}`)
+            openShortPosition(coinmEx, asset.Amount);
+        }
+    }
+}
+
+function reduceMargin(coinmEx, symbol, amount) {
+    // doc: https://binance-docs.github.io/apidocs/delivery/en/#modify-isolated-position-margin-trade
+    const message = `symbol=${symbol}&amount=${amount}&type=2&timestamp=${new Date().valueOf()}`;
+    return coinmEx.IO('api', 'POST', '/dapi/v1/positionMargin', message);
+}
 
 function formatPercent(value) {
     return `${(value * 100).toFixed(3)}%`
@@ -61,7 +96,7 @@ function formatPercent(value) {
 function logTable(positions, assetValues, avgFundingRates) {
     const findAssetValue = (currency) => {
         const aseetValue = assetValues.find(av => av.currency === currency);
-        if (aseetValue) return aseetValue.value.toFixed(3);
+        if (aseetValue) return aseetValue.value;
         return 0;
     }
     const findPos = (currency) => {
@@ -71,7 +106,7 @@ function logTable(positions, assetValues, avgFundingRates) {
         const pos = findPos(fr.currency);
         const posValue = pos ? pos.positionValue.toFixed(3) : 0;
         const assetValue = pos ? findAssetValue(fr.currency) : 0;
-        const profit = pos ? pos.reduceableValue + assetValue : 0;
+        const profit = pos ? (pos.reduceableValue + assetValue).toFixed(3) : 0;
         const avgRate = formatPercent(fr.avgRate);
         const dailyEst = formatPercent(fr.avgRate * 3);
         const yearlyEst = formatPercent(fr.avgRate * 3 * 365);
@@ -125,8 +160,9 @@ function getCoinmPositions(coinmMarkets, coinmEx) {
             const reduceableValue = reduceable * markPrice;
             const totalValue = reduceableValue + positionValue;
             const totalValue2 = collateralValue + postionPnl;
-            Log("currency", currency, "positionPnl", postionPnl, 'collateralPnl', collateralPnl, 'collateralValue', collateralValue, 'positionValue', positionValue, 'reduceable', reduceable, 'reduceableValue', reduceableValue, 'totalValue', totalValue, 'totalValue2', totalValue2);
-            positions.push({...pos, currency, positionValue, markPrice, reduceable, reduceableValue, totalValue, totalValue2});
+            const symbol = mkt.Symbol;
+            Log("currency", currency, 'symbol', symbol, "positionPnl", postionPnl, 'collateralPnl', collateralPnl, 'collateralValue', collateralValue, 'positionValue', positionValue, 'reduceable', reduceable, 'reduceableValue', reduceableValue, 'totalValue', totalValue, 'totalValue2', totalValue2);
+            positions.push({...pos, currency, symbol, positionValue, markPrice, reduceable, reduceableValue, totalValue, totalValue2});
         }
     })
     return positions;
@@ -135,6 +171,7 @@ function getCoinmPositions(coinmMarkets, coinmEx) {
 function getUSDPerps(coinmMarkets) {
     return Object.entries(coinmMarkets).filter(([key, mkt]) => mkt.Symbol.endsWith('USD_PERP'));
 }
+
 
 function getAvgFundingRates(coinmMarkets, coinmEx) {
     const history =  getUSDPerps(coinmMarkets).map(([key, mkt]) => {
@@ -315,9 +352,14 @@ function spotName() {
 }
 
 function coinmFutureName() {
-    return `${ASSET_NAME}_USD.swap`;
+    return futureSymbol(ASSET_NAME);
 }
 
+function futureSymbol(asset) {
+    return `${asset}_USD.swap`;
+}
+
+// asset name is like BTC, fmz symbol name is BTC_USD.swap, binance symbol is like BTCUSD_PERP
 function getAssetName() {
     // const ticker = spotEx.GetTicker();
     // let symbol = ticker.Symbol;
