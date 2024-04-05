@@ -31,10 +31,10 @@ function monitor() {
     let lastRecordTime = undefined;
     let [spotMarkets, coinmMarkets] = getMarkets([spotEx, coinmEx]);
     while (true) {
-        const now = (new Date()).valueOf();
+        const now = new Date();
         // record every hour at the first minute
-        if (!lastRecordTime || (now - lastRecordTime >= ONE_HOUR && now.getMinutes() === 1)) {
-            lastRecordTime = now;
+        if (!lastRecordTime || (now.valueOf() - lastRecordTime >= ONE_HOUR && now.getMinutes() === 1)) {
+            lastRecordTime = now.valueOf();
             const avgFundingRates = getAvgFundingRates(coinmMarkets, coinmEx);
             // logFundiongRates(avgFundingRates);
             Log('funding rates')
