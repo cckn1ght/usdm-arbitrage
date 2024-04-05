@@ -8,7 +8,7 @@ const TRADE_BUFFER = 1.005;
 let CONTRACT_SIZE = 10;
 // 7 天
 const FUNDING_PERIOD = 7 * 24 * 60 * 60 * 1000;
-const ONE_HOUR = 1000 * 60 * 60;
+const EIGHT_HOURS = 8 * 1000 * 60 * 60;
 
 const INIT_VALUE = 10_000;
 function main() {
@@ -32,8 +32,8 @@ function monitor() {
     let [spotMarkets, coinmMarkets] = getMarkets([spotEx, coinmEx]);
     while (true) {
         const now = new Date();
-        // record every hour at the first minute
-        if (!lastRecordTime || (now.valueOf() - lastRecordTime >= ONE_HOUR && now.getMinutes() === 1)) {
+        // record every 8 hours at the first minute
+        if (!lastRecordTime || (now.valueOf() - lastRecordTime >= EIGHT_HOURS && now.getMinutes() === 1)) {
             lastRecordTime = now.valueOf();
             const avgFundingRates = getAvgFundingRates(coinmMarkets, coinmEx);
             // logFundiongRates(avgFundingRates);
@@ -53,11 +53,12 @@ function monitor() {
             Log('assetsValue', assetsValue, 'totalValue', totalValue, 'profit', profit);
             // LogProfitReset();
             LogProfit(profit);
-            logTable(positions, assetsAndValues, avgFundingRates);
+            logTable(spotEx, positions, assetsAndValues, avgFundingRates, totalValue);
         }
         Sleep(10000);
     }
 }
+
 
 function reinvest(coinmEx, positions) {
     for (const pos of positions) {
@@ -93,7 +94,7 @@ function reduceMargin(coinmEx, symbol, amount) {
 function formatPercent(value) {
     return `${(value * 100).toFixed(3)}%`
 }
-function logTable(positions, assetValues, avgFundingRates) {
+function logTable(spotEx, positions, assetValues, avgFundingRates, totalPositionValue) {
     const findAssetValue = (currency) => {
         const aseetValue = assetValues.find(av => av.currency === currency);
         if (aseetValue) return aseetValue.value;
@@ -102,23 +103,35 @@ function logTable(positions, assetValues, avgFundingRates) {
     const findPos = (currency) => {
         return positions.find(p => p.currency === currency);
     }
-    const rows = avgFundingRates.map(fr => {
+    let rows = avgFundingRates.map(fr => {
         const pos = findPos(fr.currency);
         const posValue = pos ? pos.positionValue.toFixed(3) : 0;
         const assetValue = pos ? findAssetValue(fr.currency) : 0;
         const profit = pos ? (pos.reduceableValue + assetValue).toFixed(3) : 0;
+        const nextRate = formatPercent(fr.nextFundingRate);
         const avgRate = formatPercent(fr.avgRate);
         const dailyEst = formatPercent(fr.avgRate * 3);
         const yearlyEst = formatPercent(fr.avgRate * 3 * 365);
-        return [fr.currency, posValue, profit, avgRate, dailyEst, yearlyEst];
+        return [fr.currency, posValue, profit, nextRate, avgRate, dailyEst, yearlyEst];
     })
+    rows = rows.sort((a, b) => Number(b[1]) - Number(a[1]));
     const frTable = { 
         type: 'table', 
         title: '币本位合约', 
-        cols: ['Symbol', '仓位价值', '收益', '近7天平均费率', '估算日化', '估算年化'], 
+        cols: ['Symbol', '仓位价值', '收益', '下一次资金费率', '近7天平均费率', '估算日化', '估算年化'], 
         rows
     }
-    LogStatus('`' + JSON.stringify(frTable) + '`')
+    const assets = spotEx.GetAssets();
+    Log('assets', assets);
+    const usdtAsset = assets.find(a => a.Currency === 'USDT')
+    const usdtBalance = usdtAsset ? usdtAsset.Amount : 0;
+    const accountTable = { 
+        type: 'table', 
+        title: '账户信息', 
+        cols: ['现货 USDT 余额', '币本位仓位总价值', '初始资金', '目前总资金', '收益率'], 
+        rows: [[usdtBalance.toFixed(3), totalPositionValue.toFixed(3), INIT_VALUE, (usdtBalance + totalPositionValue).toFixed(3), formatPercent((usdtBalance + totalPositionValue)/INIT_VALUE - 1)]]
+    }
+    LogStatus('`' + JSON.stringify(accountTable) + '`\n`' + JSON.stringify(frTable)+ '`')
 }
 
 function getAssetsAndValues(coinmEx) {
@@ -172,9 +185,13 @@ function getUSDPerps(coinmMarkets) {
     return Object.entries(coinmMarkets).filter(([key, mkt]) => mkt.Symbol.endsWith('USD_PERP'));
 }
 
+function getNextFundingRates(coinmEx) {
+    // return type Array<{symbol: string, lastFundingRate: number, nextFundingTime: number}>
+    return coinmEx.IO('api', 'GET', '/dapi/v1/premiumIndex'); 
+}
 
 function getAvgFundingRates(coinmMarkets, coinmEx) {
-    const history =  getUSDPerps(coinmMarkets).map(([key, mkt]) => {
+    let history =  getUSDPerps(coinmMarkets).map(([key, mkt]) => {
         const endTime = (new Date()).valueOf();
         const startTime = endTime - FUNDING_PERIOD;
         // return type Array<{symbol: string, fundingTime: number, fundingRate: number, markPrice: number}>
@@ -184,6 +201,12 @@ function getAvgFundingRates(coinmMarkets, coinmEx) {
         const currency = `${mkt.BaseAsset}_${mkt.QuoteAsset}`
         return {currency: currency, symbol: mkt.Symbol, avgRate};
     });
+    const nextFundingRates = getNextFundingRates(coinmEx);
+    history = history.map(h => {
+        const nextFr = nextFundingRates.find(nfr => nfr.symbol === h.symbol);
+        const nextFundingRate = nextFr ? nextFr.lastFundingRate : 0;
+        return {...h, nextFundingRate}
+    })
     // high avgRate in the front
     return history.sort((a, b) => b.avgRate - a.avgRate);
 }
